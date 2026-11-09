@@ -512,6 +512,70 @@ class Controller:
     async def set_stop(self, *args, **kwargs):
         return await self.execute(self.make_stop(**kwargs))
 
+    def make_group_torque(self, torques, *, query=False, query_override=None):
+        """Return a moteus.Command which sets a feedforward torque in N*m
+        for every controller in a group in a single frame.
+
+        torques[i] is used by the controller whose ``group.slot`` is i.
+        A value of NaN leaves that slot's controller untouched.  If a
+        sync frame preceded this one, the torques take effect at the
+        time it set, see make_sync.  This is normally sent from a
+        Controller with id=0x7f (broadcast)."""
+
+        count = len(torques)
+        if count == 0 or count > 16:
+            raise ValueError(f'expected 1-16 torques, got {count}')
+
+        result, data_buf = self._make_command(
+            query=query, query_override=query_override)
+
+        writer = Writer(data_buf)
+        if count <= 3:
+            writer.write_int8(mp.WRITE_F32 | count)
+        else:
+            writer.write_int8(mp.WRITE_F32)
+            writer.write_int8(count)
+        writer.write_varuint(int(Register.GROUP_TORQUE0))
+        for torque in torques:
+            writer.write_f32(torque)
+
+        self._format_query(query, query_override, data_buf, result)
+
+        result.data = data_buf.getvalue()
+
+        return result
+
+    async def set_group_torque(self, *args, **kwargs):
+        return await self.execute(self.make_group_torque(*args, **kwargs))
+
+    def make_sync(self, *, cycle, delay_us, query=True, query_override=None):
+        """Return a moteus.Command for a sync frame.
+
+        Every controller which receives it applies the next group
+        command delay_us after the start of this frame.  The cycle
+        number can be read back as Register.SYNC_CYCLE to match replies
+        to cycles.  This is normally sent from a Controller with
+        id=0x7f (broadcast), and with query=True every controller
+        replies."""
+
+        result, data_buf = self._make_command(
+            query=query, query_override=query_override)
+
+        writer = Writer(data_buf)
+        writer.write_int8(mp.WRITE_INT32 | 0x02)
+        writer.write_varuint(int(Register.SYNC_CYCLE))
+        writer.write_int32(cycle)
+        writer.write_int32(delay_us)
+
+        self._format_query(query, query_override, data_buf, result)
+
+        result.data = data_buf.getvalue()
+
+        return result
+
+    async def set_sync(self, *args, **kwargs):
+        return await self.execute(self.make_sync(*args, **kwargs))
+
     def make_zero_velocity(self,
                            *,
                            kd_scale=None,

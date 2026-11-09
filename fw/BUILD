@@ -166,6 +166,7 @@ g4_mbed_binary(
     name = "moteus",
     srcs = MOTEUS_SOURCES + [
         "stm32g4_flash.h",
+        "can_timestamp.h",
         "fdcan.h",
         "fdcan.cc",
         "fdcan_micro_server.h",

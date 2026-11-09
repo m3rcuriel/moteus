@@ -110,6 +110,7 @@ class FDCanMicroServer : public mjlib::multiplex::MicroDatagramServer {
         | ((fdcan_header_.BitRateSwitch == FDCAN_BRS_ON) ? kBrsFlag : 0)
         | ((fdcan_header_.FDFormat == FDCAN_FD_CAN) ? kFdcanFlag : 0)
         ;
+    last_rx_timestamp_ = static_cast<uint16_t>(fdcan_header_.RxTimestamp);
 
     auto copy = current_read_callback_;
     auto bytes = current_read_header_->size;
@@ -146,6 +147,10 @@ class FDCanMicroServer : public mjlib::multiplex::MicroDatagramServer {
 
   uint32_t can_reset_count() const { return can_reset_count_; }
 
+  /// The hardware timestamp, in TIM3 counts, of the start of the most
+  /// recently received frame.
+  uint16_t last_rx_timestamp() const { return last_rx_timestamp_; }
+
  private:
   FDCan* const fdcan_;
 
@@ -157,6 +162,7 @@ class FDCanMicroServer : public mjlib::multiplex::MicroDatagramServer {
   char buf_[64] = {};
   uint32_t can_prefix_ = 0;
   uint32_t can_reset_count_ = 0;
+  uint16_t last_rx_timestamp_ = 0;
 };
 
 }

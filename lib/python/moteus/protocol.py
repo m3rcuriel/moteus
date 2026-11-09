@@ -145,6 +145,13 @@ class Register(enum.IntEnum):
     AUX2_PWM4 = 0x07e,
     AUX2_PWM5 = 0x07f,
 
+    GROUP_TORQUE0 = 0x080,
+    GROUP_TORQUE15 = 0x08f,
+    GROUP_SAMPLE_OFFSET = 0x090,
+    SYNC_CYCLE = 0x091,
+    SYNC_DELAY = 0x092,
+    SYNC_SLACK = 0x093,
+
     MODEL_NUMBER = 0x0100
     FIRMWARE_VERSION = 0x101
     REGISTER_MAP_VERSION = 0x102
@@ -351,6 +358,13 @@ def scale_register(register, resolution, value):
     elif register == Register.MILLISECOND_COUNTER:
         return int(value)
     elif register == Register.CLOCK_TRIM:
+        return int(value)
+    elif register == Register.GROUP_SAMPLE_OFFSET:
+        # Microseconds; -32768 means the frame had no timestamp.
+        return int(value)
+    elif (register == Register.SYNC_CYCLE or
+          register == Register.SYNC_DELAY or
+          register == Register.SYNC_SLACK):
         return int(value)
     elif (register == Register.AUX1_PWM_INPUT_PERIOD or
           register == Register.AUX2_PWM_INPUT_PERIOD):

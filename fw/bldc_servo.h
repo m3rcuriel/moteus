@@ -93,6 +93,15 @@ class BldcServo {
   void Start();
   void Command(const CommandData&);
 
+  /// Like Command, but the control loop does not act on it until the
+  /// first control cycle at or after apply_us, in MillisecondTimer
+  /// microseconds.  Any later Command or CommandAt replaces it.
+  void CommandAt(const CommandData&, uint32_t apply_us);
+
+  /// The MillisecondTimer microsecond time of the most recent control
+  /// cycle.
+  uint32_t control_cycle_us() const;
+
   const Status& status() const;
   const Config& config() const;
   const Control& control() const;

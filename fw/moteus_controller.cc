@@ -17,6 +17,7 @@
 #include "mjlib/base/limit.h"
 
 #include "fw/aux_port.h"
+#include "fw/can_timestamp.h"
 #include "fw/drv8323.h"
 #include "fw/math.h"
 #include "fw/moteus_hw.h"
@@ -337,6 +338,13 @@ enum class Register {
   kAux2Pwm4 = 0x07e,
   kAux2Pwm5 = 0x07f,
 
+  kGroupTorque0 = 0x080,
+  kGroupTorque15 = 0x08f,
+  kGroupSampleOffset = 0x090,
+  kSyncCycle = 0x091,
+  kSyncDelay = 0x092,
+  kSyncSlack = 0x093,
+
   kModelNumber = 0x100,
   kFirmwareVersion = 0x101,
   kRegisterMapVersion = 0x102,
@@ -546,6 +554,9 @@ class MoteusController::Impl : public multiplex::MicroServer::Server {
         firmware_(firmware),
         uuid_(uuid),
         multi_transport_(multi_transport) {
+    timer_ = timer;
+    persistent_config->Register("group", &group_, []() {});
+
     // Register for notifications when the UART servers change in aux
     // ports.  aux1 takes priority over aux2 when both are available.
     aux1_port_.SetUartServerChangedCallback([this](auto* server) {
@@ -571,7 +582,19 @@ class MoteusController::Impl : public multiplex::MicroServer::Server {
     // Check to see if we have a command to send out.
     if (command_valid_) {
       command_valid_ = false;
-      bldc_.Command(command_);
+      if (command_group_ && sync_armed_ && sync_rx_valid_) {
+        // The most recent sync frame said when this should happen.
+        sync_armed_ = false;
+        const uint32_t apply_us = sync_rx_us_ + sync_delay_us_;
+        sync_slack_us_ = static_cast<int32_t>(apply_us - timer_->read_us());
+        bldc_.CommandAt(command_, apply_us);
+      } else {
+        if (command_group_) {
+          sync_armed_ = false;
+          sync_slack_us_ = kNoSyncSlack;
+        }
+        bldc_.Command(command_);
+      }
     }
     aux1_port_.Poll();
     aux2_port_.Poll();
@@ -587,7 +610,24 @@ class MoteusController::Impl : public multiplex::MicroServer::Server {
 
   void StartFrame() override {
     command_valid_ = false;
+    command_group_ = false;
     discard_all_ = false;
+
+    // Work out when this frame started arriving, in MillisecondTimer
+    // microseconds, from the FDCAN hardware timestamp.  Every
+    // controller on the bus sees the start of frame at the same
+    // instant, regardless of when its main loop gets to the frame.
+    frame_rx_valid_ = false;
+    if (multi_transport_->last_read_was_can() && CanTimestamp::Valid()) {
+      __disable_irq();
+      const uint16_t now_ts = CanTimestamp::Read();
+      const uint32_t now_us = timer_->read_us();
+      __enable_irq();
+      const uint16_t age_us = static_cast<uint16_t>(
+          now_ts - multi_transport_->last_can_rx_timestamp());
+      frame_rx_us_ = now_us - age_us;
+      frame_rx_valid_ = true;
+    }
   }
 
   Action CompleteFrame() override {
@@ -603,6 +643,33 @@ class MoteusController::Impl : public multiplex::MicroServer::Server {
       __attribute__ ((optimize("O3"))){
     if (discard_all_) { return kDiscardRemaining; }
 
+    if (reg >= static_cast<uint32_t>(Register::kGroupTorque0) &&
+        reg <= static_cast<uint32_t>(Register::kGroupTorque15)) {
+      // A single broadcast frame can carry a torque for every
+      // controller in a group.  Each controller only acts on its own
+      // slot and silently ignores the others.
+      const int slot =
+          static_cast<int>(reg) - static_cast<int>(Register::kGroupTorque0);
+      if (slot != group_.slot) { return kSuccess; }
+
+      // A NaN leaves this controller's current command untouched.
+      const float torque_Nm = ReadTorque(value);
+      if (std::isnan(torque_Nm)) { return kSuccess; }
+
+      command_ = {};
+      command_.mode = BldcServo::Mode::kPosition;
+      command_.position = std::numeric_limits<float>::quiet_NaN();
+      command_.velocity = 0.0f;
+      command_.kp_scale = 0.0f;
+      command_.kd_scale = 0.0f;
+      command_.ilimit_scale = 0.0f;
+      command_.feedforward_Nm = torque_Nm;
+      command_valid_ = true;
+      // This is timed by the preceding sync frame, see kSyncDelay.
+      command_group_ = true;
+      return kSuccess;
+    }
+
     switch (static_cast<Register>(reg)) {
       case Register::kMode: {
         const auto new_mode_int = ReadIntMapping(value);
@@ -610,6 +677,7 @@ class MoteusController::Impl : public multiplex::MicroServer::Server {
           return kUnknownRegister;
         }
         command_valid_ = true;
+        command_group_ = false;
         const auto new_mode = static_cast<BldcServo::Mode>(new_mode_int);
         command_ = {};
         command_.mode = new_mode;
@@ -751,6 +819,34 @@ class MoteusController::Impl : public multiplex::MicroServer::Server {
 
       case Register::kClockTrim: {
         clock_manager_->SetTrim(ReadIntMapping(value));
+        return kSuccess;
+      }
+
+      case Register::kGroupTorque0:
+      case Register::kGroupTorque15: {
+        // Handled before the switch.
+        break;
+      }
+
+      case Register::kGroupSampleOffset: {
+        return kNotWriteable;
+      }
+
+      case Register::kSyncCycle: {
+        sync_cycle_ = ReadInt32Mapping(value);
+        return kSuccess;
+      }
+      case Register::kSyncSlack: {
+        return kNotWriteable;
+      }
+      case Register::kSyncDelay: {
+        // The next group command applies this long after the start of
+        // this frame.  Every controller on the bus sees the start of
+        // frame at the same instant.
+        sync_delay_us_ = ReadInt32Mapping(value);
+        sync_rx_valid_ = frame_rx_valid_;
+        sync_rx_us_ = frame_rx_us_;
+        sync_armed_ = true;
         return kSuccess;
       }
 
@@ -1155,6 +1251,41 @@ class MoteusController::Impl : public multiplex::MicroServer::Server {
       case Register::kClockTrim: {
         return IntMapping(clock_manager_->trim(), type);
       }
+      case Register::kGroupSampleOffset: {
+        // How long after the start of this frame the most recent
+        // control cycle (and thus the state reported alongside this)
+        // happened, in microseconds.
+        if (!frame_rx_valid_) {
+          return IntMapping(std::numeric_limits<int16_t>::min(), type);
+        }
+        const int32_t offset_us = static_cast<int32_t>(
+            bldc_.control_cycle_us() - frame_rx_us_);
+        return IntMapping(
+            std::max<int32_t>(
+                std::numeric_limits<int16_t>::min() + 1,
+                std::min<int32_t>(std::numeric_limits<int16_t>::max(),
+                                  offset_us)),
+            type);
+      }
+      case Register::kSyncCycle: {
+        return IntMapping(sync_cycle_, type);
+      }
+      case Register::kSyncDelay: {
+        return IntMapping(sync_delay_us_, type);
+      }
+      case Register::kSyncSlack: {
+        // How long before its deadline the most recent group command
+        // was picked up, in microseconds.  Negative means it was late.
+        if (sync_slack_us_ == kNoSyncSlack) {
+          return IntMapping(kNoSyncSlack, type);
+        }
+        return IntMapping(
+            std::max<int32_t>(
+                kNoSyncSlack + 1,
+                std::min<int32_t>(std::numeric_limits<int16_t>::max(),
+                                  sync_slack_us_)),
+            type);
+      }
 
       case Register::kAux1PwmInputPeriod: {
         return IntMapping(bldc_.aux1().pwm_input.period_us, type);
@@ -1243,6 +1374,8 @@ class MoteusController::Impl : public multiplex::MicroServer::Server {
       case Register::kMultiplexId: {
         break;
       }
+      case Register::kGroupTorque0:
+      case Register::kGroupTorque15:
       case Register::kSetOutputNearest:
       case Register::kSetOutputExact:
       case Register::kRequireReindex:
@@ -1275,6 +1408,39 @@ class MoteusController::Impl : public multiplex::MicroServer::Server {
   SystemInfo* const system_info_;
   FirmwareInfo* const firmware_;
   Uuid* const uuid_;
+
+  struct GroupConfig {
+    // Which kGroupTorqueN register this controller responds to, or
+    // -1 to ignore all of them.
+    int8_t slot = -1;
+
+    template <typename Archive>
+    void Serialize(Archive* a) {
+      a->Visit(MJ_NVP(slot));
+    }
+  };
+
+  GroupConfig group_;
+  MillisecondTimer* timer_ = nullptr;
+
+  // The start of the frame currently being processed.
+  bool frame_rx_valid_ = false;
+  uint32_t frame_rx_us_ = 0;
+
+  // True if command_ came from a group torque register.
+  bool command_group_ = false;
+
+  // A sync frame arms the time at which the next group command takes
+  // effect.
+  bool sync_armed_ = false;
+  bool sync_rx_valid_ = false;
+  uint32_t sync_rx_us_ = 0;
+  int32_t sync_delay_us_ = 0;
+  int32_t sync_cycle_ = 0;
+
+  // Reported when the last group command had no sync to time it.
+  static constexpr int32_t kNoSyncSlack = std::numeric_limits<int16_t>::min();
+  int32_t sync_slack_us_ = kNoSyncSlack;
 
   bool command_valid_ = false;
   bool discard_all_ = false;

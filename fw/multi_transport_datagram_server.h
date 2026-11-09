@@ -123,6 +123,15 @@ class MultiTransportDatagramServer : public mjlib::multiplex::MicroDatagramServe
     return fdcan_->can_reset_count();
   }
 
+  /// True if the most recently delivered frame arrived over CAN.
+  bool last_read_was_can() const {
+    return last_read_transport_id_ == kTransportIdCan;
+  }
+
+  uint16_t last_can_rx_timestamp() const {
+    return fdcan_->last_rx_timestamp();
+  }
+
   void SetPrefix(uint32_t prefix) {
     current_prefix_ = prefix;  // Cache for new servers
     fdcan_->SetPrefix(prefix);
@@ -213,6 +222,8 @@ class MultiTransportDatagramServer : public mjlib::multiplex::MicroDatagramServe
                    size_t size) {
     if (!pending_read_callback_) { return; }
 
+    last_read_transport_id_ = transport_id;
+
     // Copy data to caller's buffer
     const size_t copy_size = std::min<size_t>(
         size,
@@ -236,6 +247,8 @@ class MultiTransportDatagramServer : public mjlib::multiplex::MicroDatagramServe
   }
 
   FDCanMicroServer* const fdcan_;
+
+  uint32_t last_read_transport_id_ = kTransportIdCan;
 
   // Cached UART server pointer and prefix
   UartFdcanusbMicroServer* uart_server_ = nullptr;

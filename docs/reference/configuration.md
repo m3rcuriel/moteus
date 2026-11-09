@@ -10,6 +10,15 @@ maybe not, it depends upon your goals.
 
 The servo ID presented on the CAN bus.  After this is modified, you need to immediately adjust which servo ID you communicate with in order to continue communication or save the parameters.
 
+## `group.slot`
+
+Which group torque register (0x080 + slot) this controller responds
+to, from 0 to 15.  The default of -1 ignores all group torque
+registers.  Each controller sharing a group must have a unique slot.
+
+Receive timestamps for sync frames use TIM3, so aux port functions
+which need TIM3 can't be used together with group commands.
+
 ## `can.prefix`
 
 A 13 bit integer used as the upper 13 bits for the ID of all CAN

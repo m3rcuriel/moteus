@@ -14,6 +14,8 @@
 
 #include "fw/fdcan.h"
 
+#include "fw/can_timestamp.h"
+
 #include "PeripheralPins.h"
 
 extern const PinMap PinMap_CAN_TD[];
@@ -285,6 +287,17 @@ void FDCan::Init() {
     if (HAL_FDCAN_DisableTxDelayCompensation(&can) != HAL_OK) {
       mbed_die();
     }
+  }
+
+  // Timestamp received frames with TIM3, see can_timestamp.h.
+  CanTimestamp::ConfigureTimer();
+  if (HAL_FDCAN_ConfigTimestampCounter(
+          &can, FDCAN_TIMESTAMP_PRESC_1) != HAL_OK) {
+    mbed_die();
+  }
+  if (HAL_FDCAN_EnableTimestampCounter(
+          &can, FDCAN_TIMESTAMP_EXTERNAL) != HAL_OK) {
+    mbed_die();
   }
 
   if (HAL_FDCAN_Start(&can) != HAL_OK) {

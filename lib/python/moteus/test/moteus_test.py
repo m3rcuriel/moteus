@@ -277,6 +277,41 @@ class MoteusTest(unittest.TestCase):
             ]))
         self.assertEqual(result.expected_reply_size, 0)
 
+    def test_make_group_torque(self):
+        dut = mot.Controller(id=0x7f)
+        result = dut.make_group_torque([0.5, -1.25])
+        self.assertEqual(
+            result.data,
+            bytes([0x0e, 0x80, 0x01,
+                   0x00, 0x00, 0x00, 0x3f,
+                   0x00, 0x00, 0xa0, 0xbf,
+            ]))
+        self.assertEqual(result.expected_reply_size, 0)
+
+        result = dut.make_group_torque([0.5, -1.25, 0.0, 2.0])
+        self.assertEqual(
+            result.data,
+            bytes([0x0c, 0x04, 0x80, 0x01,
+                   0x00, 0x00, 0x00, 0x3f,
+                   0x00, 0x00, 0xa0, 0xbf,
+                   0x00, 0x00, 0x00, 0x00,
+                   0x00, 0x00, 0x00, 0x40,
+            ]))
+
+        with self.assertRaises(ValueError):
+            dut.make_group_torque([])
+
+    def test_make_sync(self):
+        dut = mot.Controller(id=0x7f)
+        result = dut.make_sync(cycle=5, delay_us=300, query=False)
+        self.assertEqual(
+            result.data,
+            bytes([0x0a, 0x91, 0x01,
+                   0x05, 0x00, 0x00, 0x00,
+                   0x2c, 0x01, 0x00, 0x00,
+            ]))
+        self.assertFalse(result.reply_required)
+
     def test_make_current(self):
         dut = mot.Controller()
         result = dut.make_current(d_A = 1.0, q_A = 2.0)

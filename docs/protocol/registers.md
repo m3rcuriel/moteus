@@ -779,6 +779,93 @@ Mode: Read/write
 The current output PWM value for the given pin on Aux1.  PWM mapping
 is used for integral types.
 
+### 0x080/0x08f - Group Torque
+
+Mode: Write only
+
+Lets a single frame carry a torque for up to 16 controllers.  Register
+0x080 + N is acted on only by the controller whose `group.slot` is N;
+all other controllers ignore it.  Normally this is sent to the
+broadcast ID (0x7f) without requesting a reply.
+
+The value is a torque in N*m using the same mapping as 0x022, so any
+of int8, int16, int32 or float may be used.  If a sync frame (0x092)
+arrived since the last group command, the command takes effect at the
+time that sync frame set.  Otherwise it takes effect immediately.
+Either way, it is applied as position mode with:
+
+* position = NaN
+* velocity = 0
+* kp_scale = 0
+* kd_scale = 0
+* ilimit_scale = 0
+* feedforward torque = the written value
+* watchdog timeout = `servo.default_timeout_s`
+
+Writing NaN (float only) leaves that controller's command unchanged.
+Any other command cancels a group command which has not yet taken
+effect.
+
+### 0x090 - Group Sample Offset
+
+Mode: Read only
+
+The time from the start of the frame being processed to the most
+recent control cycle, in microseconds.  This is the cycle whose state
+is reported in the same reply.  When read in a sync frame, it
+measures from the start of that sync frame.  If the frame had no
+hardware timestamp, this reads as -32768.
+
+### 0x091 - Sync Cycle
+
+Mode: Read/write
+
+An arbitrary cycle number written as part of a sync frame.  It reads
+back as the most recently written value, so replies can be matched to
+cycles.
+
+### 0x092 - Sync Delay
+
+Mode: Read/write
+
+Writing this register makes the frame a sync frame.  The value is a
+delay in microseconds.  The next group command to arrive takes effect
+on the first control cycle at or after the start of this sync frame
+plus the delay.  Every controller on the bus sees the start of the
+frame at the same instant, regardless of when its main loop gets to
+the frame, so they all act together, give or take one control cycle.
+
+Each sync times at most one group command, and a later sync replaces
+an unused earlier one.  If the group command arrives after the
+deadline, it takes effect on the next control cycle, which is late.
+If the sync frame was received over UART, or while TIM3 is in use by
+an aux port, it has no hardware timestamp, and the following group
+command takes effect immediately.
+
+A typical cycle is:
+
+1. One broadcast frame writing 0x091 and 0x092 together, with a query
+   and a reply requested.  Every controller replies with its state.
+2. The host computes torques from the replies.
+3. One broadcast group torque frame with no reply requested, which
+   must arrive before the sync frame's start plus the delay.
+
+### 0x093 - Sync Slack
+
+Mode: Read only
+
+For the most recent group command, the time from when this
+controller's main loop picked it up until the deadline set by its sync
+frame, in microseconds.  Negative values mean the command was late.
+Reading this in a sync frame's query reports on the previous cycle's
+command.  If that command had no sync frame to time it, this reads as
+-32768.
+
+The command still waits for the next control cycle after its
+deadline, so the actual effect is up to one control cycle later.  Use
+the smallest slack seen across all controllers to choose the 0x092
+delay.
+
 ### 0x100 - Model Number
 
 Name: Model Number

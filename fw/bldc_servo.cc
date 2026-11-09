@@ -246,8 +246,46 @@ class BldcServo::Impl : public BldcServoControl<BldcServo::Impl> {
       *mode_volatile = kFault;
     }
 
+    // The ISR may swap current_data_ with scheduled_data_, so this
+    // must be atomic with respect to it.  A direct command always
+    // supersedes any scheduled one.
+    __disable_irq();
+    scheduled_pending_ = false;
     std::swap(current_data_, next_data_);
+    __enable_irq();
   }
+
+  void CommandAt(const CommandData& data, uint32_t apply_us) {
+    if (data.mode == kFault ||
+        data.mode == kEnabling ||
+        data.mode == kCalibrating ||
+        data.mode == kCalibrationComplete) {
+      return;
+    }
+
+    // Once this is clear, the ISR will not touch scheduled_data_.
+    scheduled_pending_ = false;
+
+    CommandData* scheduled = scheduled_data_;
+    *scheduled = data;
+
+    errc err = PrepareCommand(scheduled);
+
+    telemetry_data_ = *scheduled;
+
+    if (err != errc::kSuccess) {
+      volatile auto* mode_volatile = &status_.mode;
+      volatile auto* fault_volatile = &status_.fault;
+      *fault_volatile = err;
+      *mode_volatile = kFault;
+      return;
+    }
+
+    scheduled_apply_us_ = apply_us;
+    scheduled_pending_ = true;
+  }
+
+  uint32_t control_cycle_us() const { return control_cycle_us_; }
 
   const Status& status() const { return status_; }
   const Config& config() const { return config_; }
@@ -784,6 +822,8 @@ class BldcServo::Impl : public BldcServoControl<BldcServo::Impl> {
     // position sensors.
     ISR_DoSenseCritical();
 
+    control_cycle_us_ = ms_timer_->read_us();
+
     // We should not re-enter into this interrupt until our low
     // priority portion is complete.
     NVIC_DisableIRQ(pwm_irqn_);
@@ -802,6 +842,14 @@ class BldcServo::Impl : public BldcServoControl<BldcServo::Impl> {
 #ifdef MOTEUS_PERFORMANCE_MEASURE
     status_.dwt.sense = DWT->CYCCNT;
 #endif
+
+    if (scheduled_pending_ &&
+        static_cast<int32_t>(control_cycle_us_ - scheduled_apply_us_) >= 0) {
+      CommandData* const old = current_data_;
+      current_data_ = scheduled_data_;
+      scheduled_data_ = old;
+      scheduled_pending_ = false;
+    }
 
     // current_data_ is volatile, so read it out now, and operate on
     // the pointer for the rest of the routine.
@@ -1391,13 +1439,22 @@ class BldcServo::Impl : public BldcServoControl<BldcServo::Impl> {
   Thermistor fet_thermistor_;
   Thermistor motor_thermistor_;
 
-  CommandData data_buffers_[2] = {};
+  CommandData data_buffers_[3] = {};
 
   // CommandData has its data updated to the ISR by first writing the
   // new command into (*next_data_) and then swapping it with
   // current_data_.
   CommandData* volatile current_data_{&data_buffers_[0]};
   CommandData* volatile next_data_{&data_buffers_[1]};
+
+  // A command from CommandAt waits in (*scheduled_data_) until the
+  // ISR swaps it with current_data_ at scheduled_apply_us_.  The
+  // main loop only writes it while scheduled_pending_ is false.
+  CommandData* volatile scheduled_data_{&data_buffers_[2]};
+  volatile bool scheduled_pending_ = false;
+  volatile uint32_t scheduled_apply_us_ = 0;
+
+  volatile uint32_t control_cycle_us_ = 0;
 
   // This copy of CommandData exists solely for telemetry, and should
   // never be read by an ISR.
@@ -1483,6 +1540,14 @@ void BldcServo::PollMillisecond() {
 
 void BldcServo::Command(const CommandData& data) {
   impl_->Command(data);
+}
+
+void BldcServo::CommandAt(const CommandData& data, uint32_t apply_us) {
+  impl_->CommandAt(data, apply_us);
+}
+
+uint32_t BldcServo::control_cycle_us() const {
+  return impl_->control_cycle_us();
 }
 
 const BldcServo::Status& BldcServo::status() const {
